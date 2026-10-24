@@ -1,0 +1,16 @@
+[project]
+name = "act-provider"
+version = "0.1.0"
+description = "Inspect provider that records residual-stream activations during generation"
+requires-python = ">=3.11"
+dependencies = ["inspect_ai", "torch", "transformers", "accelerate", "safetensors"]
+
+[project.entry-points.inspect_ai]
+act_provider = "act_provider.provider"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["act_provider"]
