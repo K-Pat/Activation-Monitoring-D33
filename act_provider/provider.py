@@ -3,7 +3,8 @@
 Use as `hfact/<hf model id>`, e.g. `--model-role untrusted=hfact/Qwen/Qwen3-8B`.
 
 Model args (Inspect `-M`):
-    layers   comma-separated decoder layer indices to record (default: 1/4, 1/2, 3/4 depth)
+    layers   comma-separated decoder layer indices to record (default: 1/4, 1/2, 3/4 depth and
+             the last layer, e.g. 12,24,36,47 for Qwen3-Coder-30B-A3B)
     out_dir  where activation files go (default: ./activations)
 
 Environment:
@@ -166,7 +167,8 @@ class ActivationHFAPI(HuggingFaceAPI):
         blocks = _decoder_layers(self.model)
         if layers is None:
             n = len(blocks)
-            self.layers = sorted({n // 4, n // 2, (3 * n) // 4})
+            # 1/4, 1/2, 3/4 depth plus the final decoder layer (its output, before the final norm)
+            self.layers = sorted({n // 4, n // 2, (3 * n) // 4, n - 1})
         elif isinstance(layers, int):
             self.layers = [layers]
         else:
