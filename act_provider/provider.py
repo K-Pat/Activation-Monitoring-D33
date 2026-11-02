@@ -25,6 +25,7 @@ Generation runs one call at a time so each forward pass belongs to exactly one s
 """
 
 import asyncio
+import json
 import os
 import re
 from typing import Any
@@ -38,9 +39,68 @@ from inspect_ai.model import (
     ModelOutput,
     modelapi,
 )
+from inspect_ai.model import ChatMessageAssistant
+from inspect_ai.model._call_tools import parse_tool_call
 from inspect_ai.model._providers.hf import HuggingFaceAPI
 from inspect_ai.tool import ToolChoice, ToolInfo
+from inspect_ai.util._json import JSON_SCHEMA_EXTENDED_FIELDS, json_schema_dump
 from safetensors.torch import save_file
+from shortuuid import uuid
+
+# Qwen3-Coder writes tool calls as XML, which Inspect's HF provider doesn't parse:
+#   <tool_call>\n<function=bash>\n<parameter=cmd>\nls\n</parameter>\n</function>\n</tool_call>
+_XML_CALL = re.compile(r"<tool_call>\s*<function=([^>\s]+)>(.*?)</function>\s*</tool_call>", re.S)
+_XML_PARAM = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.S)
+
+
+def _uses_xml_tools(model_name: str) -> bool:
+    return "qwen3-coder" in model_name.lower()
+
+
+def parse_xml_tool_calls(text: str, tools: list[ToolInfo]) -> tuple[str, list[Any]]:
+    """Split a Qwen3-Coder response into (text before the first call, tool calls)."""
+    calls = []
+    for m in _XML_CALL.finditer(text):
+        name, body = m.group(1), m.group(2)
+        info = next((t for t in tools if t.name == name), None)
+        props = info.parameters.properties if info else {}
+        args: dict[str, Any] = {}
+        for p in _XML_PARAM.finditer(body):
+            key, val = p.group(1), p.group(2)
+            ptype = getattr(props.get(key), "type", "string")
+            if ptype not in ("string", None):
+                try:
+                    val = json.loads(val)
+                except ValueError:
+                    pass
+            args[key] = val
+        calls.append(parse_tool_call(f"{name}_{uuid()}", name, json.dumps(args), tools))
+    first = _XML_CALL.search(text)
+    content = (text[: first.start()] if first else text).strip()
+    return content, calls
+
+
+def render_native_chat(tokenizer: Any, messages: list[ChatMessage], tools: list[ToolInfo]) -> str:
+    """Build the prompt with the model's own chat template, keeping tool calls structured.
+
+    Inspect's HF provider rewrites past tool calls into the text as JSON for every Qwen model.
+    Qwen3-Coder's template renders them in its own XML format, so pass them through instead.
+    """
+    hf_messages = []
+    for m in messages:
+        d: dict[str, Any] = {"role": m.role, "content": m.text}
+        if m.role == "assistant" and m.tool_calls:
+            d["tool_calls"] = [
+                {"type": "function", "function": {"name": tc.function, "arguments": tc.arguments}}
+                for tc in m.tool_calls
+            ]
+        elif m.role == "tool" and getattr(m, "error", None) is not None:
+            d["content"] = (m.text + "\n" if m.text else "") + f"Error: {m.error.message}"
+        hf_messages.append(d)
+    tools_list = [json_schema_dump(t, exclude=JSON_SCHEMA_EXTENDED_FIELDS) for t in tools]
+    return tokenizer.apply_chat_template(
+        hf_messages, tools=tools_list or None, add_generation_prompt=True, tokenize=False
+    )
 
 
 def _decoder_layers(model: Any) -> Any:
@@ -139,7 +199,26 @@ class ActivationHFAPI(HuggingFaceAPI):
             self._reset()
             output = await super().generate(input, tools, tool_choice, config)
             self._save()
+        if tools and _uses_xml_tools(self.model_name):
+            self._parse_xml_tools(output, tools)
         return output
+
+    def hf_chat(self, messages: list[ChatMessage], tools: list[ToolInfo]) -> str:
+        if _uses_xml_tools(self.model_name):
+            return render_native_chat(self.tokenizer, messages, tools)
+        return super().hf_chat(messages, tools)
+
+    def _parse_xml_tools(self, output: ModelOutput, tools: list[ToolInfo]) -> None:
+        for choice in output.choices:
+            msg = choice.message
+            if msg.tool_calls or "<function=" not in msg.text:
+                continue
+            content, calls = parse_xml_tool_calls(msg.text, tools)
+            if calls:
+                choice.message = ChatMessageAssistant(
+                    content=content, tool_calls=calls, model=msg.model, source="generate"
+                )
+                choice.stop_reason = "tool_calls"
 
     def _save(self) -> None:
         active = sample_active()
