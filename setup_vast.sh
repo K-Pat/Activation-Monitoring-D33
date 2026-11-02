@@ -49,9 +49,9 @@ GPU_CC="${GPU_CC// /}"
 echo "GPU:${GPU_NAME} ${GPU_GB} GB, compute capability ${GPU_CC}"
 CC_OK=$(awk -v c="$GPU_CC" 'BEGIN{print (c >= 8.9) ? 1 : 0}')
 if [[ "$MODEL" == *FP8* && $CC_OK -eq 0 ]]; then
-  die "${GPU_NAME} is too old for FP8 (needs compute capability >= 8.9). The model would load as 16-bit (~62 GB) and long episodes won't fit. Rent an H100 or H200."
+  die "${GPU_NAME} is too old for FP8 (needs compute capability >= 8.9). Rent an L40S, RTX 6000 Ada, H100 or H200."
 elif [[ $GPU_GB -lt $MIN_GPU_GB ]]; then
-  die "GPU has ${GPU_GB} GB, need at least 80 GB: the model takes ~48 GB by 25k tokens of context and episodes run longer. Rent an H100 or H200."
+  die "GPU has ${GPU_GB} GB, need at least 48 GB (weights ~29 GB plus ~0.23 GB per 1k tokens of context). Rent an L40S 48GB, H100 or H200."
 fi
 command -v docker >/dev/null || die "no docker. On Vast, rent a VM instance (filter vms_enabled=true): regular instances can't run Docker."
 $SUDO docker info >/dev/null 2>&1 || die "docker is installed but not running or not accessible. Try: sudo systemctl start docker"

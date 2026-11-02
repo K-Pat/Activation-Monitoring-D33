@@ -12,6 +12,9 @@ Environment:
     ACT_HF_REPO=<org>/<dataset>
                      when the eval finishes, upload its activations and eval log to this
                      Hugging Face dataset repo. Unset means files stay on local disk only.
+    ACT_MEM_FRACTION=<f>
+                     cap on torch's share of GPU memory (default 0.85), so running out raises an
+                     error in the run instead of freezing a unified-memory machine
     ACT_MAX_TOKENS=<n>
                      max tokens the model can write per turn (default 8192, Inspect's is 2048)
     ACT_RUN_ID=<id>  file the upload under runs/<id>/<eval_id>/ with a manifest.json
@@ -39,7 +42,12 @@ import os
 import re
 from typing import Any
 
-import torch
+# Every agent turn has a different prompt length, and torch's default allocator can't reuse
+# cached blocks across sizes, so reserved memory grew ~0.4 GB per turn until the DGX Spark froze
+# (measured 2026-11-02). Expandable segments keep it flat. Read when CUDA first allocates.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch  # noqa: E402
 from inspect_ai.hooks import Hooks, TaskEnd, hooks
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
@@ -148,6 +156,11 @@ class ActivationHFAPI(HuggingFaceAPI):
         thinking = os.environ.get("ACT_THINKING")
         if thinking is not None and "enable_thinking" not in model_args:
             model_args["enable_thinking"] = thinking.strip().lower() not in ("0", "false", "no", "off")
+        # Cap torch's share of GPU memory so an overshoot raises a clean OOM in this run. On a
+        # unified-memory machine (DGX Spark) an uncapped overshoot starves the OS and freezes it.
+        fraction = float(os.environ.get("ACT_MEM_FRACTION", "0.85"))
+        if torch.cuda.is_available() and 0 < fraction < 1:
+            torch.cuda.set_per_process_memory_fraction(fraction)
         super().__init__(model_name, base_url, api_key, config, **model_args)
 
         blocks = _decoder_layers(self.model)
@@ -214,6 +227,8 @@ class ActivationHFAPI(HuggingFaceAPI):
             output = await super().generate(input, tools, tool_choice, config)
             # calls with no tools are side calls, e.g. the attack policy's private planner
             self._save(n_tools=len(tools))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # hand cached blocks back between turns (see top of file)
         if tools and _uses_xml_tools(self.model_name):
             self._parse_xml_tools(output, tools)
         return output

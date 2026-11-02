@@ -22,9 +22,10 @@ commit, LinuxArena settings commit and kernels. Don't change it on your own mach
 
 ## Setup (once per machine)
 
-Requirements: a Vast.ai **VM instance** (regular instances can't run Docker) with an
-**H100 or H200 (80 GB+)**, and at least 150 GB of disk. Smaller cards fail on long episodes:
-the model's weights are ~31 GB, but it already uses ~48 GB at 25k tokens of context. Then:
+Requirements: a Vast.ai **VM instance** (regular instances can't run Docker) with **48 GB+**
+of GPU memory and FP8 support (L40S, H100, H200), and at least 150 GB of disk. The weights take
+~29 GB and each turn needs ~0.23 GB more per 1k tokens of context. Check that `nvidia-smi` works
+inside the VM: some VM hosts ship a driver too old for the GPU (seen on an RTX PRO 6000). Then:
 
 ```bash
 git clone https://x-access-token:$GH_TOKEN@github.com/K-Pat/Activation-Monitoring-D33.git
