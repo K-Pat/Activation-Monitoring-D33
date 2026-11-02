@@ -9,6 +9,9 @@ Model args (Inspect `-M`):
 Environment:
     ACT_THINKING=0   turn off Qwen3-style <think> blocks (passes enable_thinking=False to the
                      chat template). Unset leaves the model's default, which is thinking on.
+    ACT_HF_REPO=<org>/<dataset>
+                     when the eval finishes, upload its activations and eval log to this
+                     Hugging Face dataset repo. Unset means files stay on local disk only.
 
 Every model call (one agent turn) writes one file:
     <out_dir>/<eval_id>/<sample_id>_e<epoch>/turn<NNNNN>.safetensors
@@ -27,6 +30,7 @@ import re
 from typing import Any
 
 import torch
+from inspect_ai.hooks import Hooks, TaskEnd, hooks
 from inspect_ai.log._samples import sample_active
 from inspect_ai.model import (
     ChatMessage,
@@ -56,6 +60,9 @@ def _safe(name: Any) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", str(name))
 
 
+# every out_dir an hfact model has written to in this process, for the upload hook
+_OUT_DIRS: set[str] = set()
+
 class ActivationHFAPI(HuggingFaceAPI):
     def __init__(
         self,
@@ -66,7 +73,8 @@ class ActivationHFAPI(HuggingFaceAPI):
         **model_args: Any,
     ):
         layers = model_args.pop("layers", None)
-        self.out_dir = str(model_args.pop("out_dir", "activations"))
+        self.out_dir = os.path.abspath(str(model_args.pop("out_dir", "activations")))
+        _OUT_DIRS.add(self.out_dir)
         # ct run eval can't pass -M args, so thinking can also be set from the environment
         thinking = os.environ.get("ACT_THINKING")
         if thinking is not None and "enable_thinking" not in model_args:
@@ -160,3 +168,51 @@ class ActivationHFAPI(HuggingFaceAPI):
 @modelapi(name="hfact")
 def hfact() -> type[ActivationHFAPI]:
     return ActivationHFAPI
+
+
+def _upload(repo: str, run: str, run_dirs: list[str], log_path: str | None) -> None:
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    ops = []
+    for run_dir in run_dirs:
+        for root, _, files in os.walk(run_dir):
+            for f in files:
+                local = os.path.join(root, f)
+                rel = os.path.relpath(local, run_dir).replace(os.sep, "/")
+                ops.append(CommitOperationAdd(f"activations/{run}/{rel}", local))
+    if log_path and os.path.isfile(log_path):
+        ops.append(CommitOperationAdd(f"logs/{os.path.basename(log_path)}", log_path))
+    else:
+        print(f"[hfact] eval log not found at {log_path!r}, uploading activations only")
+
+    HfApi().create_commit(
+        repo_id=repo,
+        repo_type="dataset",
+        operations=ops,
+        commit_message=f"Add eval {run}",
+    )
+    print(f"[hfact] uploaded {len(ops)} files for eval {run} to {repo}")
+
+
+@hooks(
+    name="hfact_upload",
+    description="Upload hfact activations and the eval log to a Hugging Face dataset repo",
+)
+class UploadToHF(Hooks):
+    """Runs when a task finishes. Set ACT_HF_REPO=<org>/<dataset> to turn it on.
+
+    Uploads <out_dir>/<eval_id>/ to activations/<eval_id>/ and the eval log to logs/ in one
+    commit. If the upload fails, Inspect logs a warning and the files stay on disk.
+    """
+
+    def enabled(self) -> bool:
+        return bool(os.environ.get("ACT_HF_REPO"))
+
+    async def on_task_end(self, data: TaskEnd) -> None:
+        run = _safe(data.eval_id)
+        run_dirs = [os.path.join(d, run) for d in _OUT_DIRS if os.path.isdir(os.path.join(d, run))]
+        if not run_dirs:
+            return  # this eval didn't use hfact
+        await asyncio.to_thread(
+            _upload, os.environ["ACT_HF_REPO"], run, run_dirs, data.log.location or None
+        )
