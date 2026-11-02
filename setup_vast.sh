@@ -42,6 +42,17 @@ echo "model $MODEL | dataset $HF_REPO | control tower $CT_DIR"
 # ---------------------------------------------------------------------------
 step "2/9 Preflight: GPU, Docker, disk"
 command -v nvidia-smi >/dev/null || die "no nvidia-smi. Rent a GPU machine with NVIDIA drivers."
+# Vast's VM image ships driver 535: too old for the pinned torch (needs >= 580) and for Blackwell
+DRIVER_MAJOR="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d. -f1)"
+if [[ -z "$DRIVER_MAJOR" || "$DRIVER_MAJOR" -lt 580 ]]; then
+  echo "NVIDIA driver ${DRIVER_MAJOR:-not working} is too old: installing driver 580 (needs one reboot)"
+  $SUDO apt-get update -qq
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "linux-headers-$(uname -r)" >/dev/null
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "nvidia-*535*" "libnvidia-*535*" >/dev/null 2>&1 || true
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-driver-580 >/dev/null \
+    || die "driver install failed. On Blackwell GPUs (RTX PRO 6000, B200) try nvidia-driver-580-open."
+  die "driver 580 installed. Reboot (sudo reboot), reconnect, and run ./setup_vast.sh again."
+fi
 GPU="$(nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits | head -1)"
 IFS=, read -r GPU_NAME GPU_MB GPU_CC <<<"$GPU"
 GPU_GB=$(( ${GPU_MB// /} / 1024 ))
@@ -58,6 +69,18 @@ $SUDO docker info >/dev/null 2>&1 || die "docker is installed but not running or
 if [[ $(id -u) -ne 0 ]] && ! docker info >/dev/null 2>&1; then
   die "your user can't run docker without sudo. Run: sudo usermod -aG docker \$USER, then log out and back in."
 fi
+# Ubuntu's docker.io package lacks the compose and buildx plugins that LinuxArena needs
+if ! docker compose version >/dev/null 2>&1 || ! docker buildx version >/dev/null 2>&1; then
+  echo "installing Docker's compose and buildx plugins"
+  $SUDO install -m 0755 -d /etc/apt/keyrings
+  $SUDO curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+    | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
+  $SUDO apt-get update -qq
+  $SUDO DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-compose-plugin docker-buildx-plugin >/dev/null \
+    || die "couldn't install docker compose/buildx plugins"
+fi
+echo "docker $(docker version --format '{{.Server.Version}}'), $(docker compose version --short) compose"
 DISK_GB=$(df -BG --output=avail "$HOME" | tail -1 | tr -dc 0-9)
 echo "free disk: ${DISK_GB} GB"
 [[ $DISK_GB -ge $MIN_DISK_GB ]] || die "need at least ${MIN_DISK_GB} GB free disk (model ~31 GB, Docker images, activations)."
@@ -100,6 +123,10 @@ git -C "$CT_DIR" -c advice.detachedHead=false checkout -q "$CT_COMMIT" \
 (cd "$CT_DIR" && uv sync -q)
 (cd "$CT_DIR" && uv run ct settings pull "$SETTINGS_NAME@$SETTINGS_REF") \
   || die "couldn't pull the $SETTINGS_NAME settings at $SETTINGS_REF"
+# ct run eval refuses to start without a model price table
+if [[ ! -s "$HOME/.cache/control-tower/model_rates.json" ]]; then
+  (cd "$CT_DIR" && uv run python scripts/generate_model_rates.py >/dev/null) || die "couldn't generate model rates"
+fi
 GOT="$(git -C "$CT_DIR/.settings/$SETTINGS_NAME" rev-parse HEAD)"
 [[ "$GOT" == "$SETTINGS_REF" ]] || die "settings are at $GOT, expected $SETTINGS_REF"
 echo "Control Tower $(git -C "$CT_DIR" rev-parse --short HEAD), settings $(git -C "$CT_DIR/.settings/$SETTINGS_NAME" rev-parse --short HEAD)"
@@ -135,7 +162,7 @@ print('can see', os.environ['HF_REPO'])
 step "8/9 Downloading $MODEL (~31 GB, skipped if cached)"
 (cd "$CT_DIR" && uv run hf download "$MODEL" >/dev/null) || die "model download failed"
 echo "model cached"
-(cd "$CT_DIR" && uv run ct settings pull-images --only web_scraping --only shared_dotfiles --only file_indexing) \
+(cd "$CT_DIR" && SKIP_DOCKER_BUILD=1 uv run ct settings pull-images --only web_scraping --only shared_dotfiles --only file_indexing) \
   || echo "  (pre-pulling Docker images failed. Not fatal: the first run builds them, which takes a few extra minutes.)"
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,18 @@ name = "act-provider"
 version = "0.1.0"
 description = "Inspect provider that records residual-stream activations during generation"
 requires-python = ">=3.11"
-dependencies = ["inspect_ai", "torch", "transformers", "accelerate", "safetensors", "huggingface_hub"]
+# Pinned to the versions tested on the DGX Spark. Newer torch/transformers/triton broke the
+# FP8 MoE kernel (Triton compile error on a Vast RTX 4090, 2026-11-02).
+dependencies = [
+    "inspect_ai",
+    "torch==2.14.1",
+    "transformers==5.20.2",
+    "triton==3.8.0",
+    "accelerate==1.15.0",
+    "kernels==0.17.2",
+    "safetensors",
+    "huggingface_hub",
+]
 
 [project.entry-points.inspect_ai]
 act_provider = "act_provider.provider"
