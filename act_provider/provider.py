@@ -12,6 +12,13 @@ Environment:
     ACT_HF_REPO=<org>/<dataset>
                      when the eval finishes, upload its activations and eval log to this
                      Hugging Face dataset repo. Unset means files stay on local disk only.
+    ACT_RUN_ID=<id>  file the upload under runs/<id>/<eval_id>/ with a manifest.json
+    ACT_RUN_META=<json>
+                     extra fields (task, condition, versions) copied into the manifest
+
+Each turn file's safetensors metadata records the model, the recorded layers, the run ID and
+`n_tools`. A turn with n_tools=0 is a side call such as the attack policy's private planner,
+not an action the agent took.
 
 Every model call (one agent turn) writes one file:
     <out_dir>/<eval_id>/<sample_id>_e<epoch>/turn<NNNNN>.safetensors
@@ -198,7 +205,8 @@ class ActivationHFAPI(HuggingFaceAPI):
         async with self._lock:
             self._reset()
             output = await super().generate(input, tools, tool_choice, config)
-            self._save()
+            # calls with no tools are side calls, e.g. the attack policy's private planner
+            self._save(n_tools=len(tools))
         if tools and _uses_xml_tools(self.model_name):
             self._parse_xml_tools(output, tools)
         return output
@@ -220,7 +228,7 @@ class ActivationHFAPI(HuggingFaceAPI):
                 )
                 choice.stop_reason = "tool_calls"
 
-    def _save(self) -> None:
+    def _save(self, n_tools: int) -> None:
         active = sample_active()
         if active is not None:
             run = _safe(active.eval_id)
@@ -241,7 +249,13 @@ class ActivationHFAPI(HuggingFaceAPI):
 
         path = os.path.join(self.out_dir, run, sample)
         os.makedirs(path, exist_ok=True)
-        save_file(tensors, os.path.join(path, f"turn{turn:05d}.safetensors"))
+        meta = {
+            "model": self.model_name,
+            "n_tools": str(n_tools),
+            "layers": ",".join(str(i) for i in self.layers),
+            "run_id": os.environ.get("ACT_RUN_ID", ""),
+        }
+        save_file(tensors, os.path.join(path, f"turn{turn:05d}.safetensors"), metadata=meta)
 
 
 @modelapi(name="hfact")
@@ -249,28 +263,97 @@ def hfact() -> type[ActivationHFAPI]:
     return ActivationHFAPI
 
 
-def _upload(repo: str, run: str, run_dirs: list[str], log_path: str | None) -> None:
+def _jsonable(x: Any) -> Any:
+    return json.loads(json.dumps(x, default=str))
+
+
+def build_manifest(log: Any, run_id: str | None, meta: dict[str, Any], n_turns: int) -> dict:
+    """One record per attempted trajectory: what ran, how it ended, how it scored."""
+    if not log.samples and log.location:
+        from inspect_ai.log import read_eval_log
+
+        log = read_eval_log(log.location)  # eval sets can hand hooks a header-only log
+    roles = {k: v.model for k, v in (log.eval.model_roles or {}).items()}
+    samples = []
+    for s in log.samples or []:
+        samples.append(
+            {
+                "id": str(s.id),
+                "epoch": s.epoch,
+                "scores": {k: _jsonable(v.value) for k, v in (s.scores or {}).items()},
+                "error": s.error.message[:2000] if s.error else None,
+                "limit": _jsonable(s.limit.model_dump()) if s.limit else None,
+            }
+        )
+    return {
+        "run_id": run_id,
+        "eval_id": log.eval.eval_id,
+        "status": log.status,  # success = the eval finished, whatever the task score
+        "error": log.error.message[:2000] if log.error else None,
+        "model_roles": roles,
+        "started_at": log.stats.started_at if log.stats else None,
+        "completed_at": log.stats.completed_at if log.stats else None,
+        "n_turns": n_turns,
+        "samples": samples,
+        "meta": meta,
+    }
+
+
+def upload_eval(
+    repo: str,
+    eval_id: str,
+    run_dirs: list[str],
+    log_path: str | None,
+    manifest: dict,
+    run_id: str | None = None,
+) -> None:
+    """Upload one eval's activations, log and manifest to the dataset in a single commit.
+
+    With a run ID:  runs/<run_id>/<eval_id>/{manifest.json, log.eval, activations/...}
+    Without one:    activations/<eval_id>/... and logs/<log file>
+    """
     from huggingface_hub import CommitOperationAdd, HfApi
 
+    base = f"runs/{run_id}/{eval_id}" if run_id else None
     ops = []
     for run_dir in run_dirs:
         for root, _, files in os.walk(run_dir):
             for f in files:
                 local = os.path.join(root, f)
                 rel = os.path.relpath(local, run_dir).replace(os.sep, "/")
-                ops.append(CommitOperationAdd(f"activations/{run}/{rel}", local))
+                dest = f"{base}/activations/{rel}" if base else f"activations/{eval_id}/{rel}"
+                ops.append(CommitOperationAdd(dest, local))
     if log_path and os.path.isfile(log_path):
-        ops.append(CommitOperationAdd(f"logs/{os.path.basename(log_path)}", log_path))
+        dest = f"{base}/log.eval" if base else f"logs/{os.path.basename(log_path)}"
+        ops.append(CommitOperationAdd(dest, log_path))
     else:
-        print(f"[hfact] eval log not found at {log_path!r}, uploading activations only")
+        print(f"[hfact] eval log not found at {log_path!r}, uploading without it")
+    manifest_bytes = json.dumps(manifest, indent=2).encode()
+    for run_dir in run_dirs:  # keep a local copy so a failed upload can be retried
+        with open(os.path.join(run_dir, "manifest.json"), "wb") as fh:
+            fh.write(manifest_bytes)
+    if base:
+        ops.append(CommitOperationAdd(f"{base}/manifest.json", manifest_bytes))
 
     HfApi().create_commit(
         repo_id=repo,
         repo_type="dataset",
         operations=ops,
-        commit_message=f"Add eval {run}",
+        commit_message=f"Add {run_id or 'eval'} ({eval_id}, {manifest['status']})",
     )
-    print(f"[hfact] uploaded {len(ops)} files for eval {run} to {repo}")
+    print(f"[hfact] uploaded {len(ops)} files for {run_id or 'eval'} {eval_id} to {repo}")
+
+
+def find_run_dirs(eval_id: str, out_dirs: set[str] | None = None) -> list[str]:
+    run = _safe(eval_id)
+    dirs = out_dirs if out_dirs is not None else _OUT_DIRS
+    return [os.path.join(d, run) for d in dirs if os.path.isdir(os.path.join(d, run))]
+
+
+def count_turns(run_dirs: list[str]) -> int:
+    return sum(
+        f.endswith(".safetensors") for d in run_dirs for _, _, files in os.walk(d) for f in files
+    )
 
 
 @hooks(
@@ -280,18 +363,29 @@ def _upload(repo: str, run: str, run_dirs: list[str], log_path: str | None) -> N
 class UploadToHF(Hooks):
     """Runs when a task finishes. Set ACT_HF_REPO=<org>/<dataset> to turn it on.
 
-    Uploads <out_dir>/<eval_id>/ to activations/<eval_id>/ and the eval log to logs/ in one
-    commit. If the upload fails, Inspect logs a warning and the files stay on disk.
+    ACT_RUN_ID (e.g. T1_attack_r2) files the upload under runs/<run_id>/, and ACT_RUN_META
+    (a JSON object) is copied into the manifest. If the upload fails, Inspect logs a warning
+    and the files stay on disk with a local manifest.json.
     """
 
     def enabled(self) -> bool:
         return bool(os.environ.get("ACT_HF_REPO"))
 
     async def on_task_end(self, data: TaskEnd) -> None:
-        run = _safe(data.eval_id)
-        run_dirs = [os.path.join(d, run) for d in _OUT_DIRS if os.path.isdir(os.path.join(d, run))]
+        run_dirs = find_run_dirs(data.eval_id)
         if not run_dirs:
             return  # this eval didn't use hfact
+        run_id = os.environ.get("ACT_RUN_ID") or None
+        meta = json.loads(os.environ.get("ACT_RUN_META") or "{}")
+        manifest = await asyncio.to_thread(
+            build_manifest, data.log, run_id, meta, count_turns(run_dirs)
+        )
         await asyncio.to_thread(
-            _upload, os.environ["ACT_HF_REPO"], run, run_dirs, data.log.location or None
+            upload_eval,
+            os.environ["ACT_HF_REPO"],
+            _safe(data.eval_id),
+            run_dirs,
+            data.log.location or None,
+            manifest,
+            run_id,
         )
