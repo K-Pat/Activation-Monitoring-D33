@@ -12,6 +12,8 @@ Environment:
     ACT_HF_REPO=<org>/<dataset>
                      when the eval finishes, upload its activations and eval log to this
                      Hugging Face dataset repo. Unset means files stay on local disk only.
+    ACT_MAX_TOKENS=<n>
+                     max tokens the model can write per turn (default 8192, Inspect's is 2048)
     ACT_RUN_ID=<id>  file the upload under runs/<id>/<eval_id>/ with a manifest.json
     ACT_RUN_META=<json>
                      extra fields (task, condition, versions) copied into the manifest
@@ -191,6 +193,11 @@ class ActivationHFAPI(HuggingFaceAPI):
     def max_connections(self) -> int:
         # one sample per forward pass, so hook outputs can't mix samples
         return 1
+
+    def max_tokens(self) -> int | None:
+        # Inspect's HF default is 2048, which truncates large file edits mid tool call, so the
+        # call can't be parsed and the agent retries until Control Tower stops it for no progress
+        return int(os.environ.get("ACT_MAX_TOKENS", "8192"))
 
     async def generate(
         self,
