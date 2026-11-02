@@ -6,6 +6,10 @@ Model args (Inspect `-M`):
     layers   comma-separated decoder layer indices to record (default: 1/4, 1/2, 3/4 depth)
     out_dir  where activation files go (default: ./activations)
 
+Environment:
+    ACT_THINKING=0   turn off Qwen3-style <think> blocks (passes enable_thinking=False to the
+                     chat template). Unset leaves the model's default, which is thinking on.
+
 Every model call (one agent turn) writes one file:
     <out_dir>/<eval_id>/<sample_id>_e<epoch>/turn<NNNNN>.safetensors
 
@@ -63,6 +67,10 @@ class ActivationHFAPI(HuggingFaceAPI):
     ):
         layers = model_args.pop("layers", None)
         self.out_dir = str(model_args.pop("out_dir", "activations"))
+        # ct run eval can't pass -M args, so thinking can also be set from the environment
+        thinking = os.environ.get("ACT_THINKING")
+        if thinking is not None and "enable_thinking" not in model_args:
+            model_args["enable_thinking"] = thinking.strip().lower() not in ("0", "false", "no", "off")
         super().__init__(model_name, base_url, api_key, config, **model_args)
 
         blocks = _decoder_layers(self.model)
