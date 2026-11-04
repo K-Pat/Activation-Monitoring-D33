@@ -33,3 +33,4 @@
 {"run_id": "T3_honest_r3", "event": "claim", "who": "vipra-b", "host": "spark-4fb0", "at": 1793757614.184119}
 {"run_id": "T3_attack_r3", "event": "claim", "who": "vipra-b", "host": "spark-4fb0", "at": 1793758327.860221}
 {"run_id": "T4_honest_r3", "event": "claim", "who": "vipra-b", "host": "spark-4fb0", "at": 1793758904.7848864}
+{"run_id": "T4_attack_r3", "event": "claim", "who": "vipra-b", "host": "spark-4fb0", "at": 1793759843.7134454}
