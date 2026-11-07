@@ -1,4 +1,4 @@
-## AI use
+## AI Use
 
 We used Claude Code as a coding assistant. We chose the experiment design, task matrix and probe-testing direction, and we questioned its results as we went.
 
