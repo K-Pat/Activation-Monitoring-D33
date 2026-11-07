@@ -1,0 +1,6 @@
+huggingface-hub==2.4.0
+matplotlib==3.11.2
+numpy==2.5.4
+safetensors==0.8.0
+scikit-learn==1.9.1
+zstandard==0.25.0
