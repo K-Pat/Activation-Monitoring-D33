@@ -135,6 +135,6 @@ HF_TOKEN=... GH_TOKEN=... GIT_NAME="..." GIT_EMAIL=... ./setup_vast.sh
 `AGENTS.md` is the full collection runbook. `task_list.md` is the original experiment brief, and
 parts of it are out of date. For example, the study later moved from Qwen3-8B to Qwen3-Coder-30B.
 
-## AI use
+## AI Use
 
-We used Claude Code as a coding assistant to support implementation, model setup, and training, and Codex to assist with literature review, research, and experimental design. All major research decisions, including experiment design, task selection, and evaluation methodology, were made by our team. We critically reviewed, audited, and monitored AI-generated outputs throughout the project and take full responsibility for the accuracy, quality, and integrity of the final work. See more in AI_USE.md.
+We used Claude Code as a coding assistant to support implementation, model setup, and training, and Codex to assist with literature review, research, and experimental design. All major research decisions, including experiment design, task selection, and evaluation methodology, were made by our team. We critically reviewed, audited, and monitored AI-generated outputs throughout the project and take full responsibility for the accuracy, quality, and integrity of the final work. See more about specific prompt usage in AI_USE.md.
