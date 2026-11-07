@@ -137,4 +137,4 @@ parts of it are out of date. For example, the study later moved from Qwen3-8B to
 
 ## AI use
 
-We used Claude Code as a coding assistant to support implementation, model setup, and training, and Codex to assist with literature review, research, and experimental design. All major research decisions, including experiment design, task selection, and evaluation methodology, were made by our team. We critically reviewed, audited, and monitored AI-generated outputs throughout the project and take full responsibility for the accuracy, quality, and integrity of the final work. See more in AI_USE.md
+We used Claude Code as a coding assistant to support implementation, model setup, and training, and Codex to assist with literature review, research, and experimental design. All major research decisions, including experiment design, task selection, and evaluation methodology, were made by our team. We critically reviewed, audited, and monitored AI-generated outputs throughout the project and take full responsibility for the accuracy, quality, and integrity of the final work. See more in AI_USE.md.
